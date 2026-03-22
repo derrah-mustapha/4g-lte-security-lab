@@ -1,0 +1,153 @@
+# 4G LTE core + radio lab: Open5GS EPC (MME, HSS, SGW-C/U, SMF/PGW-C, UPF/PGW-U, PCRF)
+# with srsRAN 4G eNB and UE connected through a ZeroMQ virtual radio (no RF hardware).
+#
+#   PROFILE=baseline  docker compose up -d      (default: Open5GS defaults)
+#   PROFILE=hardened  docker compose up -d      (security-hardened, see docs/)
+#   docker compose --profile rogue up rogue-enb (attack demo, lab only)
+#
+# Networks:  epc 10.20.1.0/24 (S6a, S11, S5-C, S1-C PFCP, Gx)   ran 10.20.2.0/24 (S1-MME, S1-U, S5-U, virtual radio)
+#            dn  10.20.3.0/24 (SGi, the only network with internet access)
+
+x-epc: &epc
+  image: gradiant/open5gs:2.7.2
+  restart: unless-stopped
+  networks: [epc]
+
+services:
+  mongo:
+    image: mongo:6.0
+    restart: unless-stopped
+    volumes: [mongo-data:/data/db]
+    networks:
+      epc: {ipv4_address: 10.20.1.2}
+
+  hss:
+    <<: *epc
+    command: open5gs-hssd -c /opt/open5gs/etc/open5gs/hss.yaml
+    volumes:
+      - ./config/profiles/${PROFILE:-baseline}/hss.yaml:/opt/open5gs/etc/open5gs/hss.yaml:ro
+      - ./config/profiles/${PROFILE:-baseline}/freeDiameter:/opt/open5gs/etc/freeDiameter:ro
+    networks: {epc: {ipv4_address: 10.20.1.10}}
+    depends_on: [mongo]
+
+  pcrf:
+    <<: *epc
+    command: open5gs-pcrfd -c /opt/open5gs/etc/open5gs/pcrf.yaml
+    volumes:
+      - ./config/profiles/${PROFILE:-baseline}/pcrf.yaml:/opt/open5gs/etc/open5gs/pcrf.yaml:ro
+      - ./config/profiles/${PROFILE:-baseline}/freeDiameter:/opt/open5gs/etc/freeDiameter:ro
+    networks: {epc: {ipv4_address: 10.20.1.15}}
+    depends_on: [mongo]
+
+  mme:
+    <<: *epc
+    user: root                      # needed to install the S1 firewall rule, then drops to open5gs
+    entrypoint: ["/mme-start.sh"]
+    command: []
+    cap_add: [NET_ADMIN]
+    environment:
+      S1_ALLOW: "${S1_ALLOW:-}"
+    volumes:
+      - ./scripts/mme-start.sh:/mme-start.sh:ro
+      - ./config/profiles/${PROFILE:-baseline}/mme.yaml:/opt/open5gs/etc/open5gs/mme.yaml:ro
+      - ./config/profiles/${PROFILE:-baseline}/freeDiameter:/opt/open5gs/etc/freeDiameter:ro
+    networks:
+      epc: {ipv4_address: 10.20.1.11}
+      ran: {ipv4_address: 10.20.2.11}
+    depends_on: [hss]
+
+  sgwc:
+    <<: *epc
+    command: open5gs-sgwcd -c /opt/open5gs/etc/open5gs/sgwc.yaml
+    volumes: ["./config/profiles/${PROFILE:-baseline}/sgwc.yaml:/opt/open5gs/etc/open5gs/sgwc.yaml:ro"]
+    networks: {epc: {ipv4_address: 10.20.1.12}}
+
+  sgwu:
+    <<: *epc
+    command: open5gs-sgwud -c /opt/open5gs/etc/open5gs/sgwu.yaml
+    volumes: ["./config/profiles/${PROFILE:-baseline}/sgwu.yaml:/opt/open5gs/etc/open5gs/sgwu.yaml:ro"]
+    networks:
+      epc: {ipv4_address: 10.20.1.16}
+      ran: {ipv4_address: 10.20.2.16}
+
+  smf:
+    <<: *epc
+    command: open5gs-smfd -c /opt/open5gs/etc/open5gs/smf.yaml
+    volumes:
+      - ./config/profiles/${PROFILE:-baseline}/smf.yaml:/opt/open5gs/etc/open5gs/smf.yaml:ro
+      - ./config/profiles/${PROFILE:-baseline}/freeDiameter:/opt/open5gs/etc/freeDiameter:ro
+    networks: {epc: {ipv4_address: 10.20.1.13}}
+    depends_on: [pcrf]
+
+  upf:
+    <<: *epc
+    user: root
+    entrypoint: ["/upf-start.sh"]
+    command: []
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    sysctls: {net.ipv4.ip_forward: "1"}
+    environment:
+      CORE_ISOLATION: "${CORE_ISOLATION:-no}"
+    volumes:
+      - ./scripts/upf-start.sh:/upf-start.sh:ro
+      - ./config/profiles/${PROFILE:-baseline}/upf.yaml:/opt/open5gs/etc/open5gs/upf.yaml:ro
+    networks:
+      epc: {ipv4_address: 10.20.1.14}
+      ran: {ipv4_address: 10.20.2.14}
+      dn: {ipv4_address: 10.20.3.14}
+
+  enb:
+    image: gradiant/srsran-4g:23_11
+    restart: on-failure
+    entrypoint: ["srsenb", "/cfg/enb.conf"]
+    volumes:
+      - ./config/profiles/${PROFILE:-baseline}/enb.conf:/cfg/enb.conf:ro
+      - ./config/profiles/${PROFILE:-baseline}/rr.conf:/cfg/rr.conf:ro
+      - ./config/profiles/${PROFILE:-baseline}/sib.conf:/cfg/sib.conf:ro
+      - ./config/profiles/${PROFILE:-baseline}/rb.conf:/cfg/rb.conf:ro
+    networks: {ran: {ipv4_address: 10.20.2.20}}
+    depends_on: [mme, sgwu]
+
+  ue:
+    image: gradiant/srsran-4g:23_11
+    restart: on-failure
+    cap_add: [NET_ADMIN, SYS_NICE]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    entrypoint: ["srsue", "/cfg/ue.conf"]
+    volumes: ["./config/profiles/${PROFILE:-baseline}/ue.conf:/cfg/ue.conf:ro"]
+    networks: {ran: {ipv4_address: 10.20.2.31}}
+    depends_on: [enb]
+
+  # Server on the data network, used for iperf3 throughput/latency tests through the UPF.
+  dn-server:
+    image: networkstatic/iperf3
+    restart: unless-stopped
+    command: ["-s"]
+    networks: {dn: {ipv4_address: 10.20.3.50}}
+
+  # Attack demo only (profile "rogue"): an unauthorised eNB trying to join the MME.
+  rogue-enb:
+    image: gradiant/srsran-4g:23_11
+    profiles: [rogue]
+    restart: "no"
+    entrypoint: ["srsenb", "/cfg/enb.conf"]
+    volumes:
+      - ./config/profiles/${PROFILE:-baseline}/rogue-enb.conf:/cfg/enb.conf:ro
+      - ./config/profiles/${PROFILE:-baseline}/rr.conf:/cfg/rr.conf:ro
+      - ./config/profiles/${PROFILE:-baseline}/sib.conf:/cfg/sib.conf:ro
+      - ./config/profiles/${PROFILE:-baseline}/rb.conf:/cfg/rb.conf:ro
+    networks: {ran: {ipv4_address: 10.20.2.66}}
+
+networks:
+  epc:
+    internal: true
+    ipam: {config: [{subnet: 10.20.1.0/24}]}
+  ran:
+    internal: true
+    ipam: {config: [{subnet: 10.20.2.0/24}]}
+  dn:
+    ipam: {config: [{subnet: 10.20.3.0/24}]}
+
+volumes:
+  mongo-data:
