@@ -1,0 +1,11 @@
+logger:
+  path:
+    file: /opt/open5gs/var/log/open5gs/sgwu.log
+global: null
+sgwu:
+  pfcp:
+    server:
+    - address: 10.20.1.16
+  gtpu:
+    server:
+    - address: 10.20.2.16

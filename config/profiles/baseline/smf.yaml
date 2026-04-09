@@ -1,0 +1,32 @@
+logger:
+  path:
+    file: /opt/open5gs/var/log/open5gs/smf.log
+global: null
+smf:
+  pfcp:
+    server:
+    - address: 10.20.1.13
+    client:
+      upf:
+      - address: 10.20.1.14
+  gtpc:
+    server:
+    - address: 10.20.1.13
+  gtpu:
+    server:
+    - address: 10.20.1.13
+  metrics:
+    server:
+    - port: 9090
+      address: 10.20.1.13
+  session:
+  - subnet: 10.45.0.0/24
+    gateway: 10.45.0.1
+    dnn: internet
+  dns:
+  - 8.8.8.8
+  - 1.1.1.1
+  mtu: 1400
+  ctf:
+    enabled: auto
+  freeDiameter: /opt/open5gs/etc/freeDiameter/smf.conf
